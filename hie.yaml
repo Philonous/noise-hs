@@ -1,0 +1,8 @@
+cradle:
+  stack:
+    - path: "./src"
+      component: "wireguard:lib"
+    - path: "./test-suite"
+      component: "wireguard:test:tests"
+    - path: "./app"
+      component: "wireguard:exe:wireguard"

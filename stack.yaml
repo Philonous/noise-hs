@@ -1,0 +1,11 @@
+resolver: lts-17.7
+
+packages:
+  - .
+
+extra-deps:
+
+nix:
+  packages:
+    - zlib
+    - postgresql

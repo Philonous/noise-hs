@@ -59,6 +59,14 @@ kdf2 key input =
       t2 = hmac t0 (t1 <> BS.singleton 0x2)
   in (t1, t2)
 
+kdf3 :: ByteString -> ByteString -> (ByteString, ByteString, ByteString)
+kdf3 key input =
+  let t0 = hmac key input
+      t1 = hmac t0 (BS.singleton 0x1)
+      t2 = hmac t0 (t1 <> BS.singleton 0x2)
+      t3 = hmac t0 (t2 <> BS.singleton 0x3)
+  in (t1, t2, t3)
+
 aeadEncrypt :: ByteString -> Word64 -> ByteString -> ByteString -> ByteString
 aeadEncrypt key counter plain authText =
   let nonceBS = Serialize.runPut $ do

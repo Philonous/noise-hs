@@ -91,7 +91,7 @@ tests:
     - wireguard
     - hedgehog
     - tasty
-    - tasty-hedgehog
+    - hspec-hedgehog
     - tasty-hspec
     ghc-options:
     - -rtsopts

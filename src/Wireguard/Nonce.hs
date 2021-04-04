@@ -1,5 +1,5 @@
 {-# LANGUAGE NamedFieldPuns #-}
-module Nonce where
+module Wireguard.Nonce where
 
 import           Data.Set  (Set)
 import qualified Data.Set  as Set

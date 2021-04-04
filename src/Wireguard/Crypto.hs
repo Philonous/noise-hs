@@ -1,43 +1,59 @@
-module Crypto where
+{-# LANGUAGE FlexibleInstances #-}
 
+module Wireguard.Crypto
+  ( module Wireguard.Crypto
+  , SecretKey
+  , PublicKey
+  ) where
 
-import qualified Crypto.KDF.HKDF              as HKDF
 import qualified Crypto.PubKey.Curve25519     as Curve25519
+import           Crypto.PubKey.Curve25519     (SecretKey, PublicKey)
 import           Data.ByteString              (ByteString)
 import qualified Data.ByteString              as BS
 import           Data.Data                    (Proxy(..))
 import qualified Data.Serialize               as Serialize
 import           Data.Word
 
-import qualified Crypto.MAC.Poly1305          as Poly1305
-import qualified Crypto.Hash                  as Hash
-import qualified Crypto.MAC.HMAC              as Hmac
 import qualified Crypto.Cipher.ChaChaPoly1305 as AEAD
 import           Crypto.ECC
-import           Crypto.Error                 (CryptoFailable(..)
-                                          , CryptoError
-                                          , eitherCryptoError, throwCryptoError
-                                          )
+import           Crypto.Error                 (throwCryptoError, maybeCryptoError)
+import qualified Crypto.Hash                  as Hash
+import qualified Crypto.MAC.HMAC              as Hmac
+import qualified Crypto.MAC.Poly1305          as Poly1305
+import           Crypto.Random.Types          (MonadRandom)
 import           Data.ByteArray
-
-import qualified Crypto.Cipher.ChaChaPoly1305 as ChaChaPoly1305
-
--- X25519 keys
 
 curveX25519 :: Proxy Curve_X25519
 curveX25519 = Proxy @Curve_X25519
 
-mkKeyPair :: IO (ByteString, ByteString)
+class EncodeBS a where
+  encodeBS :: a -> ByteString
+
+instance EncodeBS SecretKey where
+  encodeBS = convert
+
+instance EncodeBS PublicKey where
+  encodeBS = encodePoint curveX25519
+
+mkKeyPair :: MonadRandom m => m (SecretKey, PublicKey)
 mkKeyPair = do
   kp <- curveGenerateKeyPair curveX25519
-  let pub = encodePoint curveX25519 $ keypairGetPublic kp
+  let pub = keypairGetPublic kp
       priv = keypairGetPrivate kp
-  return (convert priv, pub)
+  return (priv, pub)
 
-dh :: ByteString -> ByteString -> ByteString
-dh secretKeyBD publicKey = throwCryptoError $ do
-  secretKey <- Curve25519.secretKey secretKeyBD
-  pubkey <- decodePoint curveX25519 publicKey
+readPublicKey :: ByteString -> Maybe PublicKey
+readPublicKey = maybeCryptoError . decodePoint curveX25519
+
+readKeyPair :: ByteString -> ByteString -> Maybe (SecretKey, PublicKey)
+readKeyPair secretKeyBD publicKeyBD = do -- Maybe
+  secretKey <- maybeCryptoError $ Curve25519.secretKey secretKeyBD
+  pubkey <- maybeCryptoError $ decodePoint curveX25519 publicKeyBD
+  return (secretKey, pubkey)
+
+
+dh :: SecretKey -> PublicKey -> ByteString
+dh secretKey pubkey = throwCryptoError $ do
   convert <$> ecdh curveX25519 secretKey pubkey
 
 hash :: ByteString -> ByteString

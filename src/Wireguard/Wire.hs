@@ -1,14 +1,12 @@
 {-# LANGUAGE StrictData #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 
-module Wire where
+module Wireguard.Wire where
 
 import           Control.Monad
 import           Data.ByteString    (ByteString)
 import qualified Data.ByteString    as BS
 import           Data.Serialize
-import           Data.Serialize.Get
-import           Data.Serialize.Put
 import           Data.Word
 
 data Init =
@@ -125,8 +123,9 @@ data Message
   | TransportDataMessage TransportData
 
 
-getMessage :: Get Message
-getMessage = do
+-- getMessage :: Get Message --
+getMessage :: ByteString -> Either String Message
+getMessage = runGet $ do
   tp <- getWord8
   case tp of
     0x1 -> InitMessage <$> getInitMessage

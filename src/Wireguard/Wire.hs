@@ -132,3 +132,11 @@ getMessage = runGet $ do
     0x2 -> InitResponseMessage <$> getInitResponseMessage
     0x4 -> TransportDataMessage <$> getTransportDataMessage
     _ -> fail $ "unknown message type " ++ show tp
+
+mkTAI64NBS :: Word64 -> Word32 -> ByteString
+mkTAI64NBS seconds pico = runPut $ do
+  putWord64be seconds
+  putWord32be pico
+
+parseTAI64NBS :: ByteString -> Either String (Word64, Word32)
+parseTAI64NBS = runGet $ (,) <$> getWord64be <*> getWord32be

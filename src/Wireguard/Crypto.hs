@@ -4,6 +4,7 @@ module Wireguard.Crypto
   ( module Wireguard.Crypto
   , SecretKey
   , PublicKey
+  , Curve25519.toPublic
   ) where
 
 import qualified Crypto.PubKey.Curve25519     as Curve25519
@@ -35,6 +36,11 @@ instance EncodeBS SecretKey where
 instance EncodeBS PublicKey where
   encodeBS = encodePoint curveX25519
 
+newtype Encoded a = Encoded ByteString
+
+asBS :: EncodeBS a => a -> Encoded a
+asBS = Encoded . encodeBS
+
 mkKeyPair :: MonadRandom m => m (SecretKey, PublicKey)
 mkKeyPair = do
   kp <- curveGenerateKeyPair curveX25519
@@ -42,13 +48,20 @@ mkKeyPair = do
       priv = keypairGetPrivate kp
   return (priv, pub)
 
+encodePublicKey :: PublicKey -> ByteString
+encodePublicKey = encodeBS
+
 readPublicKey :: ByteString -> Maybe PublicKey
 readPublicKey = maybeCryptoError . decodePoint curveX25519
 
-readKeyPair :: ByteString -> ByteString -> Maybe (SecretKey, PublicKey)
-readKeyPair secretKeyBD publicKeyBD = do -- Maybe
-  secretKey <- maybeCryptoError $ Curve25519.secretKey secretKeyBD
-  pubkey <- maybeCryptoError $ decodePoint curveX25519 publicKeyBD
+encodeKeyPair :: (SecretKey, PublicKey) -> ByteString
+encodeKeyPair (secretKey, _) = encodeBS secretKey
+
+-- | Read a key pair. You only need to pass the secret key
+readKeyPair :: ByteString -> Maybe (SecretKey, PublicKey)
+readKeyPair secretKeyBS = do -- Maybe
+  secretKey <- maybeCryptoError $ Curve25519.secretKey secretKeyBS
+  let pubkey = Curve25519.toPublic secretKey
   return (secretKey, pubkey)
 
 

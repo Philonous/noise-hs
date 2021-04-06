@@ -1,21 +1,35 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE StrictData #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
-module Messages where
+module Wireguard.Messages where
 
-import           Control.Monad       (guard)
-import           Crypto.Random.Types (MonadRandom(getRandomBytes))
-import           Data.Bits           (Bits(shiftL))
-import           Data.ByteString     (ByteString)
-import qualified Data.ByteString     as BS
+import           Control.Monad          (guard)
+import           Crypto.Random.Types    (MonadRandom(getRandomBytes))
+import           Data.Bits              (Bits(shiftL))
+import           Data.ByteString        (ByteString)
+import qualified Data.ByteString        as BS
+import qualified Data.ByteString.Base64 as Base64
+import           Data.Fixed
+import           Data.IORef
 import           Data.Kind
+import qualified Data.List              as List
+import           Data.Map.Strict        (Map)
+import qualified Data.Map.Strict        as Map
+import           Data.Text              (Text)
+import qualified Data.Text              as Text
+import qualified Data.Text.Encoding     as Text
+import           Data.Time.Clock
+import           Data.Time.Clock.POSIX
 import           Data.Word
+import           Util
 
 import           Wireguard.Crypto
 import           Wireguard.Nonce
-import qualified Wireguard.Wire      as Wire
+import qualified Wireguard.Wire         as Wire
 
-import qualified Wireguard.Crypto    as Crypto
+import qualified Wireguard.Crypto       as Crypto
 
 construction :: ByteString
 construction = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s"
@@ -26,12 +40,53 @@ identifier = "WireGuard v1 zx2c4 Jason@zx2c4.com"
 labelMac1 :: ByteString
 labelMac1= "mac1----"
 
+newtype TAI64N  = TAI64N ByteString
+  deriving (Eq, Ord)
+
+-- Compare https://cr.yp.to/libtai/tai64.html
+getTAI64N :: IO TAI64N
+getTAI64N = do
+  now <- getPOSIXTime
+  let (seconds, picoNDT) = properFraction now :: (Word64, NominalDiffTime)
+      taiLabel = seconds + 2 ^ 62
+      MkFixed picoInt = nominalDiffTimeToSeconds picoNDT
+  return $ TAI64N $ Wire.mkTAI64NBS taiLabel (fromInteger picoInt)
+
+instance Show TAI64N where
+  show (TAI64N bs) =
+    let parsed = case Wire.parseTAI64NBS bs of
+                   Left e -> "»invalid«"
+                   Right (taiLabel, pico) ->
+                     let seconds = taiLabel - 2^62
+                         ptime = fromIntegral seconds + (fromIntegral pico / 2 ^ 32)
+                         time = posixSecondsToUTCTime ptime
+                     in show time
+    in "TAI64N(" ++ show (Hex bs) ++ " = " ++ parsed ++ ")"
+
+data Party
+  = Initiator
+  | Receiver
+  deriving (Eq, Ord, Show)
+
 data ConState
   = Initialized
   | SentInit
   | HaveInit
   | Open -- After we sent or received the response, respectively
   deriving (Show, Eq, Ord)
+
+-- | Singleton for conState
+--
+-- [ConStateS]
+-- When pattern matching on this value, we also learn the type of
+-- the State we are in
+data ConStateS (st :: ConState) where
+  SInitialized :: ConStateS 'Initialized
+  SSentInit :: ConStateS 'SentInit
+  SHaveInit :: ConStateS 'HaveInit
+  SOpen :: ConStateS 'Open
+
+deriving instance Show (ConStateS st)
 
 -- `AtStates states st a` is `a`` iff st is an element of states
 --
@@ -42,6 +97,8 @@ type family AtStates (sts :: [ConState]) (st :: ConState) (a :: Type) :: Type wh
   AtStates (st : sts) st a = a
   AtStates (notSt : sts) st a = AtStates sts st a
 
+-- atStates :: AtStates sts st a -> ConIState st -> (Either a () -> r) -> r
+-- atStates x SInitialized
 
 data State (st :: ConState) =
   State
@@ -59,7 +116,65 @@ data State (st :: ConState) =
   , tSend, tRecv :: AtStates '[Open] st ByteString
   , nSend :: Word64
   , nRecv :: Window -- priority queue to keep track of which n we have seen
+  , conState :: ConStateS st -- ^ See [ConStateS]
   }
+
+instance Show (State st) where
+  -- Explicitly match on the conState to avoid having to bring in the heavy
+  -- artillery (singletons)
+  show State{..} =
+    List.intercalate "\n  "
+       [ "State"
+       , "{ conState = "++ show conState
+       , ", sPrivOur = "++ encd sPrivOur
+       , ", sPubOur = "++ encd sPubOur
+       , ", ePrivOur = "++ helperISH (encd @Crypto.SecretKey) ePrivOur
+       , ", ePubOur = "++ helperISH (encd @Crypto.PublicKey) ePubOur
+       , ", sPubTheirs = "++ case conState of
+                           SSentInit -> encd sPubTheirs
+                           SHaveInit -> encd sPubTheirs
+                           SOpen -> encd sPubTheirs
+                           _ -> "()"
+       , ", ePubTheirs = "++ case conState of
+                                SHaveInit -> encd ePubTheirs
+                                _ -> "()"
+       , ", q = "++ b64 q
+       , ", h = "++ b64 h
+       , ", c = "++ helperISH b64 c
+       , ", we = "++ show we
+       , ", they = "++ case conState of
+                      SHaveInit -> show they
+                      SOpen -> show they
+                      _ -> "()"
+       , ", tSend = "++ case conState of
+                          SOpen -> b64 tSend
+                          _ -> "()"
+       , ", tRecv = "++ case conState of
+                          SOpen -> b64 tRecv
+                          _ -> "()"
+       , ", nsend = "++ show nSend
+       , ", nRecv = "++ show nRecv
+       , "}"
+       ]
+    where
+      encd :: EncodeBS a => a -> String
+      encd = b64 . encodeBS
+      b64 = show . Text.decodeUtf8 . Base64.encode
+      -- Some uglyness to avoid bringing in singletons
+      helperISH :: forall a. (a -> String)
+                -> AtStates '[Initialized, SentInit, HaveInit] st a
+                -> String
+      helperISH f k = case conState of
+                            SInitialized -> f k
+                            SSentInit -> f k
+                            SHaveInit -> f k
+                            _ -> "()"
+
+-- | Existential for States so we can store them e.g. in a map.
+--
+-- To reciver the state index, pattern match on 'conState'
+data SomeState where
+  SomeState :: State st -> SomeState
 
 getRandomWord32 :: MonadRandom m => m Word32
 getRandomWord32 = do
@@ -68,12 +183,13 @@ getRandomWord32 = do
 
 initState
   :: MonadRandom m =>
-     (SecretKey, PublicKey)
+     SecretKey
   -> m (State 'Initialized)
-initState (sPrivOur, sPubOur) = do
+initState sPrivOur = do
   (ePrivOur, ePubOur) <- mkKeyPair
   we <- getRandomWord32
-  let q = BS.replicate 32 0
+  let sPubOur = Crypto.toPublic sPrivOur
+      q = BS.replicate 32 0
       c = hash construction
       h = hash (c <> identifier)
       ePubTheirs = ()
@@ -82,16 +198,16 @@ initState (sPrivOur, sPubOur) = do
       tRecv = ()
       nSend = 0
       nRecv = newWindow
-      conState = Initialized
       sPubTheirs = ()
-  return State{..}
+  return State{conState = SInitialized, ..}
+
 
 mkInitMessage
-  :: State Initialized
-  -> ByteString
-  -> PublicKey
+  :: PublicKey
+  -> TAI64N
+  -> State Initialized
   -> (Wire.Init, State SentInit)
-mkInitMessage State{..} tStamp sPubR =
+mkInitMessage sPubR (TAI64N tStamp) State{..} =
   let sPrivI=sPrivOur
       sPubI=sPubOur
       ePrivI=ePrivOur
@@ -113,15 +229,16 @@ mkInitMessage State{..} tStamp sPubR =
   in (Wire.Init{..}, State { c = ci_final
                            , h = hi_final
                            , sPubTheirs = sPubR
+                           , conState = SSentInit
                            , ..
                            })
 
 checkInitMessage
-  :: State Initialized
+  :: Maybe TAI64N
   -> Wire.Init
-  -> Maybe PublicKey
-  -> Maybe (ByteString, State HaveInit)
-checkInitMessage State{..} Wire.Init{..} mbSPubIKnown = do -- Maybe
+  -> State Initialized
+  -> Maybe (PublicKey, TAI64N, State HaveInit)
+checkInitMessage mbOldTStamp Wire.Init{..} State{..} = do -- Maybe
   let sPrivR = sPrivOur
       sPubR = sPubOur
       ci = c
@@ -135,25 +252,26 @@ checkInitMessage State{..} Wire.Init{..} mbSPubIKnown = do -- Maybe
 
   sPubIReceivedBS <- aeadDecrypt k 0 static hi''
   sPubIReceived <- readPublicKey sPubIReceivedBS
-  sPubI <- case mbSPubIKnown of
-            -- We don't know the key, so we take the one we received on faith
-            Nothing -> Just sPubIReceived
-            Just sPubIKnown | sPubIKnown == sPubIReceived -> Just sPubIKnown
-                            | otherwise -> Nothing
 
   let hi''' = hash (hi'' <> static)
       (ci_final, k') = kdf2 ci'' (dh sPrivR sPubI)
 
-  tstamp <-  aeadDecrypt k' 0 timestamp hi'''
+  tstamp <- TAI64N <$> aeadDecrypt k' 0 timestamp hi'''
+
+  case mbOldTStamp of
+    Nothing -> return ()
+    Just oldTStamp -> guard $ oldTStamp < tstamp
 
   let hi_final = hash (hi''' <> timestamp)
 
-  return ( tstamp
+  return ( sPubIReceived
+         , tstamp
          , State { they = sender
                  , h = hi_final
                  , c = ci_final
                  , ePubTheirs = ePubI
                  , sPubTheirs = sPubI
+                 , conState = SHaveInit
                  , ..
                  })
 
@@ -189,8 +307,21 @@ mkResponseMessage State{..} =
             , ePubTheirs = ()
             , tSend
             , tRecv
+            , conState = SOpen
             , ..
             })
+
+-- | CheckInitMessage + mkResponseMessage, don't really need them separately
+handleInitMessage
+  :: Maybe PublicKey
+  -> Maybe TAI64N
+  -> Wire.Init
+  -> State 'Initialized
+  -> Maybe (Wire.InitResponse, State 'Open)
+handleInitMessage mbSPubThey mbTStamp initMessage st = do -- Maybe
+  (tstamp, st') <- checkInitMessage mbSPubThey  mbTStamp initMessage st
+  Just $ mkResponseMessage st'
+
 
 checkResponseMessage
   :: State SentInit
@@ -223,45 +354,28 @@ checkResponseMessage State{..} Wire.InitResponse{..} = do -- Maybe
             , they = sender
             , tSend
             , tRecv
+            , conState = SOpen
             , ..
             }
 
 mkTransportData
-  :: Word32
-  -> ByteString
+  :: ByteString
   -> State Open
   -> (Wire.TransportData, State Open)
-mkTransportData receiver bs st@State{nSend, tSend} =
+mkTransportData bs st@State{nSend, tSend, they = receiver} =
   let paddingLen = 16 - BS.length bs `mod` 16
       bsPadded = bs <> BS.replicate paddingLen 0x0
       packet = aeadEncrypt tSend nSend bsPadded mempty
   in (Wire.TransportData{counter = nSend, ..}, st{nSend = nSend + 1})
 
-checkTransportData
+recvTransportData
   :: Wire.TransportData
   -> State Open
   -> (Maybe ByteString, State Open)
-checkTransportData Wire.TransportData{..} st@State{nRecv, tRecv} =
+recvTransportData Wire.TransportData{..} st@State{nRecv, tRecv} =
   case checkNonce counter nRecv of
     (False, nRecv') -> (Nothing, st{nRecv = nRecv'})
     (True, nRecv') ->
       case aeadDecrypt tRecv counter packet mempty of
         Nothing -> (Nothing, st{nRecv = nRecv'})
         Just bs -> (Just bs, st{nRecv = nRecv'})
-
-test :: IO ByteString
-test = do
-  keysI@(_, sPubI) <- mkKeyPair
-  keysR@(_, sPubR) <- mkKeyPair
-
-  stI <- initState keysI
-  stR <- initState keysR
-  let tstamp = BS.replicate 12 4
-      (initMessage, stI') = mkInitMessage stI tstamp sPubR
-      (tStamp, stR') = fromJust $ checkInitMessage stR initMessage (Just sPubI)
-      (reponseMessage, stR'') = mkResponseMessage stR'
-      stI'' = fromJust $ checkResponseMessage stI' reponseMessage
-  return tStamp
-  where
-    fromJust (Just r) = r
-    fromJust Nothing = error "fromJust"

@@ -9,6 +9,7 @@ dependencies:
   - aeson
   - async
   - bytestring
+  - base64-bytestring
   - containers
   - data-default
   - lens
@@ -18,6 +19,7 @@ dependencies:
   - cereal
   - memory
   - random
+  - time
 
 default-extensions:
   - ApplicativeDo
@@ -62,29 +64,16 @@ ghc-options:
     - -Werror=incomplete-uni-patterns
     - -Werror=incomplete-record-updates
 
-executables:
-  wireguard:
-    dependencies:
-    - wireguard
-    ghc-options:
-    - -rtsopts
-    - -threaded
-    - -with-rtsopts=-N
-    - -Wall
-    main: Main.hs
-    source-dirs: app
-    extra-source-files:
-    - CHANGELOG.md
-    - LICENSE.md
-    - README.md
-    - package.yaml
-    - stack.yaml
-
 library:
   dependencies:
   - base
   source-dirs: src
-
+  exposed-modules:
+    Wireguard
+    Wireguard.Crypto
+    Wireguard.Wire
+    Wireguard.Messages
+    Wireguard.Nonce
 tests:
   tests:
     dependencies:

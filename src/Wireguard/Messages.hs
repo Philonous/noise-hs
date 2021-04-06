@@ -254,7 +254,7 @@ checkInitMessage mbOldTStamp Wire.Init{..} State{..} = do -- Maybe
   sPubIReceived <- readPublicKey sPubIReceivedBS
 
   let hi''' = hash (hi'' <> static)
-      (ci_final, k') = kdf2 ci'' (dh sPrivR sPubI)
+      (ci_final, k') = kdf2 ci'' (dh sPrivR sPubIReceived)
 
   tstamp <- TAI64N <$> aeadDecrypt k' 0 timestamp hi'''
 
@@ -270,7 +270,7 @@ checkInitMessage mbOldTStamp Wire.Init{..} State{..} = do -- Maybe
                  , h = hi_final
                  , c = ci_final
                  , ePubTheirs = ePubI
-                 , sPubTheirs = sPubI
+                 , sPubTheirs = sPubIReceived
                  , conState = SHaveInit
                  , ..
                  })
@@ -310,18 +310,6 @@ mkResponseMessage State{..} =
             , conState = SOpen
             , ..
             })
-
--- | CheckInitMessage + mkResponseMessage, don't really need them separately
-handleInitMessage
-  :: Maybe PublicKey
-  -> Maybe TAI64N
-  -> Wire.Init
-  -> State 'Initialized
-  -> Maybe (Wire.InitResponse, State 'Open)
-handleInitMessage mbSPubThey mbTStamp initMessage st = do -- Maybe
-  (tstamp, st') <- checkInitMessage mbSPubThey  mbTStamp initMessage st
-  Just $ mkResponseMessage st'
-
 
 checkResponseMessage
   :: State SentInit

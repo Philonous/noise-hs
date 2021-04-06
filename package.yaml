@@ -69,11 +69,11 @@ library:
   - base
   source-dirs: src
   exposed-modules:
-    Wireguard
-    Wireguard.Crypto
-    Wireguard.Wire
-    Wireguard.Messages
-    Wireguard.Nonce
+    - Wireguard
+    - Wireguard.Crypto
+    - Wireguard.Wire
+    - Wireguard.Messages
+    - Wireguard.Nonce
 tests:
   tests:
     dependencies:

@@ -16,7 +16,8 @@ module Wireguard
   -- * Messages
   , mkInitMessage
   , writeInitMessage
-  , handleInitMessage
+  , checkInitMessage
+  , mkResponseMessage
   , writeInitResponseMessage
   , checkResponseMessage
   , mkTransportData

@@ -41,6 +41,7 @@ import qualified Control.Concurrent.Chan          as Chan
 import           Control.Concurrent.MVar
 import           Control.Concurrent.Thread.Delay  (delay)
 import           Control.Monad                    (when)
+import           Control.Monad                    (unless)
 import qualified Control.Monad.Catch              as Ex
 import           Data.ByteString                  (ByteString)
 import qualified Data.ByteString                  as BS
@@ -92,6 +93,7 @@ data WaitSession =
   , waitSessionState :: State 'SentInit
   , waitSessionSendRekeyTimeoutReached :: IORef Bool
   , waitSessionReceiveRekeyTimeoutReached :: IORef Bool
+  , waitSessionOnConnected :: MVar ()
   }
 
 data St = StOpen | StClosed deriving (Show, Eq, Ord)
@@ -141,7 +143,7 @@ connection send ourKey theirKey = do
   mkWeakMVar conVar (close $ Connection conVar)
   return $ Connection conVar
 
-waitSession config a sess = do
+waitSession config a sess onConnected = do
   waitSessionSendRekeyTimeoutReached <- newIORef False
   _ <- async $ do
     delay $ configRekeyAfterTime config
@@ -157,19 +159,25 @@ waitSession config a sess = do
           , waitSessionState = sess
           , waitSessionSendRekeyTimeoutReached
           , waitSessionReceiveRekeyTimeoutReached
+          , waitSessionOnConnected = onConnected
           }
 
-init :: Connection -> IO ()
+-- | Try to connect to the peer, returns a function that waits for the
+-- connection to complete
+init :: Connection -> IO (IO ())
 init con = withConnection con $ \con__ -> do
   -- We are the initiator
   case wgNewSession con__ of
-    Just _waiting -> return (con__, ())
+    Just waiting -> return (con__, readMVar $ waitSessionOnConnected waiting)
     Nothing -> do
+      onConnectedRef <- newEmptyMVar
+      let onConnected = putMVar onConnectedRef ()
       sess <- doInit con__
-      a <- async $ asyncInit (we sess)
+      a <- async $ asyncInit (we sess) onConnectedRef
       -- Smart constructor for WaitSession
-      ws <- waitSession (wgConfig con__)  a sess
-      return (con__{wgNewSession = Just ws } , ())
+      ws <- waitSession (wgConfig con__)  a sess onConnectedRef
+      return (con__{wgNewSession = Just ws }
+             , readMVar onConnectedRef)
   where
     doInit con__ = do
       newSess <- initState (wgOurKey con__)
@@ -177,7 +185,7 @@ init con = withConnection con $ \con__ -> do
       let (out, sess') = mkInitMessage (wgTheirKey con__) now newSess
       wgSend con__ $ writeInitMessage out
       return sess'
-    asyncInit cur = do
+    asyncInit cur onConnected = do
       threadDelay 5_000_000
       cont <- withConnection con $ \con__ -> do
         case wgNewSession con__ of
@@ -186,6 +194,7 @@ init con = withConnection con $ \con__ -> do
                    -> do
                      sess <- doInit con__
                      ws <- waitSession (wgConfig con__) (waitSessionAsync s) sess
+                                       onConnected
                      return ( con__{wgNewSession = Just ws}
                             , Just $ we sess
                             )
@@ -194,7 +203,7 @@ init con = withConnection con $ \con__ -> do
           _ -> return (con__, Nothing)
       case cont of
         Nothing -> return ()
-        Just cur' -> asyncInit cur'
+        Just cur' -> asyncInit cur' onConnected
 
 
 
@@ -257,7 +266,8 @@ input con bs =
             Nothing -> do
               logDebug [i|Received unaccpetable response message #{msg}|]
               return (con__, Nothing)
-            Just session ->
+            Just session -> do
+              waitSessionOnConnected waitSession
               return (con__{ wgPreviousSession = wgCurrentSession con__
                            , wgCurrentSession = Just session
                            , wgNewSession = Nothing
@@ -308,15 +318,24 @@ rekey con = do
   return ()
 
 
-send con bs = withConnection con $ \con__ ->
-  case wgCurrentSession con__ of
-    Nothing -> Ex.throwM NotConnected
-    Just sess -> do
-      let (tdm, sess') = mkTransportData  bs sess
-      wgSend con__ $ writeTransportDataMessage tdm
-      -- Check if timeout has triggered
-      readIORef (wgSendRekeyTimeoutReached con__) >>= \case
-        False -> return ()
-        True -> rekey con
+send con bs = do
+  done <- withConnection con $ \con__ ->
+    case wgCurrentSession con__ of
+      Nothing -> case wgState con__ of
+                   StClosed -> Ex.throwM NotConnected
+                   -- Connection not established, wait
+                   StOpen -> return (con__, False)
 
-      return (con__{wgCurrentSession = Just sess'}, ())
+      Just sess -> do
+        let (tdm, sess') = mkTransportData  bs sess
+        wgSend con__ $ writeTransportDataMessage tdm
+        -- Check if timeout has triggered
+        readIORef (wgSendRekeyTimeoutReached con__) >>= \case
+          False -> return ()
+          True -> rekey con
+
+        return (con__{wgCurrentSession = Just sess'}, True)
+  unless done $ do
+    waitConnected <- init con
+    waitConnected
+    send con bs

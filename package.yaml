@@ -12,6 +12,8 @@ dependencies:
   - base64-bytestring
   - containers
   - data-default
+  - exceptions
+  - interpolate
   - lens
   - mtl
   - text
@@ -20,6 +22,7 @@ dependencies:
   - memory
   - random
   - time
+  - unbounded-delays
 
 default-extensions:
   - ApplicativeDo
@@ -42,6 +45,7 @@ default-extensions:
   - NumericUnderscores
   - OverloadedLabels
   - OverloadedStrings
+  - PartialTypeSignatures
   - PatternSynonyms
   - PolyKinds
   - QuantifiedConstraints
@@ -88,3 +92,11 @@ tests:
     - -with-rtsopts=-N
     main: Main.hs
     source-dirs: test-suite
+
+benchmarks:
+  benchmark:
+    dependencies:
+      - wireguard
+      - criterion
+    main: Benchmark.hs
+    source-dirs: benchmark

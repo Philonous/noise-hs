@@ -4,18 +4,18 @@
 module Wireguard.Wire where
 
 import           Control.Monad
-import           Data.ByteString    (ByteString)
-import qualified Data.ByteString    as BS
+import           Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
 import           Data.Serialize
 import           Data.Word
 
 data Init =
   Init
-  { sender :: Word32
-  , ephemeral :: ByteString -- 32 bytes
-  , static :: ByteString -- 32 + 16 bytes
-  , timestamp :: ByteString -- 12 + 16 bytes
-  } deriving Show
+  { initSender :: Word32
+  , initEphemeral :: ByteString -- 32 bytes
+  , initStatic :: ByteString -- 32 + 16 bytes
+  , initTimestamp :: ByteString -- 12 + 16 bytes
+  } deriving (Eq, Show)
 
 getZeroes :: Int -> Get ()
 getZeroes n = replicateM_ n $ do
@@ -34,94 +34,95 @@ writeInitMessage :: Init -> ByteString
 writeInitMessage Init{..} = runPut $ do
     putWord8 0x1
     replicateM_ 3 $ putWord8 0x0
-    putWord32le sender
-    putByteString ephemeral
-    putByteString static
-    putByteString timestamp
+    putWord32le   initSender
+    putByteString initEphemeral
+    putByteString initStatic
+    putByteString initTimestamp
 
 getInitMessage :: Get Init
 getInitMessage = do
     -- Don't get the type octet, this is handled by the caller
     getZeroes 3
-    sender <- getWord32le
-    ephemeral  <- getByteString 32
-    static     <- getByteString (32 + 16)
-    timestamp  <- getByteString (12 + 16)
+    initSender <- getWord32le
+    initEphemeral  <- getByteString 32
+    initStatic     <- getByteString (32 + 16)
+    initTimestamp  <- getByteString (12 + 16)
     return Init{..}
 
 data InitResponse =
   InitResponse
-  { sender :: Word32
-  , receiver :: Word32
-  , ephemeral :: ByteString -- 32 bytes
-  , empty :: ByteString -- 0 + 16 bytes
-  }
+  { initResponseSender :: Word32
+  , initResponseReceiver :: Word32
+  , initResponseEphemeral :: ByteString -- 32 bytes
+  , initResponseEmpty :: ByteString -- 0 + 16 bytes
+  } deriving (Eq, Show)
 
 writeInitResponseMessage :: InitResponse -> ByteString
 writeInitResponseMessage InitResponse{..} = runPut $ do
     putWord8 0x02
     replicateM_ 3 $ putWord8 0
-    putWord32le sender
-    putWord32le receiver
-    putByteString ephemeral
-    putByteString empty
+    putWord32le   initResponseSender
+    putWord32le   initResponseReceiver
+    putByteString initResponseEphemeral
+    putByteString initResponseEmpty
 
 getInitResponseMessage :: Get InitResponse
 getInitResponseMessage = do
     -- Don't get the type octet, this is handled by the caller
     getZeroes 3
-    sender <- getWord32le
-    receiver <- getWord32le
-    ephemeral  <- getByteString 32
-    empty      <- getByteString (0 + 16)
+    initResponseSender <- getWord32le
+    initResponseReceiver <- getWord32le
+    initResponseEphemeral  <- getByteString 32
+    initResponseEmpty      <- getByteString (0 + 16)
     return InitResponse{..}
 
 data TransportData =
   TransportData
-  { receiver :: Word32
-  , counter :: Word64
-  , packet :: ByteString -- variable
-  }
+  { transportDataReceiver :: Word32
+  , transportDataCounter :: Word64
+  , transportDataPacket :: ByteString -- variable
+  } deriving (Eq, Show)
 
 writeTransportDataMessage :: TransportData -> ByteString
 writeTransportDataMessage TransportData{..} = runPut $ do
     putWord8 0x4
     replicateM_ 3 $ putWord8 0
-    putWord32le receiver
-    putWord64le counter
-    putByteString packet
+    putWord32le transportDataReceiver
+    putWord64le transportDataCounter
+    putByteString transportDataPacket
 
 getTransportDataMessage :: Get TransportData
 getTransportDataMessage = do
     -- Don't get the type octet, this is handled by the caller
-    receiver <- getWord32le
-    counter <- getWord64le
-    packet <- remaining >>= getByteString
+    getZeroes 3
+    transportDataReceiver <- getWord32le
+    transportDataCounter <- getWord64le
+    transportDataPacket <- remaining >>= getByteString
     return TransportData{..}
 
 data MACed a =
   MACed
-  { payload :: ByteString
-  , mac1 :: ByteString -- 16 bytes
-  , mac2 :: ByteString -- 16 bytes
-  }
+  { macEdPayload :: ByteString
+  , macedMac1 :: ByteString -- 16 bytes
+  , macedMac2 :: ByteString -- 16 bytes
+  } deriving (Eq, Show)
 
 addMacs :: MACed a -> ByteString
-addMacs MACed{..} = BS.concat [payload, mac1, mac2]
+addMacs MACed{..} = BS.concat [macEdPayload, macedMac1, macedMac2]
 
 getMacs :: ByteString -> Maybe (MACed a)
 getMacs bs = case BS.length bs > 32 of
                False -> Nothing
                True ->
-                 let (payload, macs) = BS.splitAt (BS.length bs - 32) bs
-                     (mac1, mac2) = BS.splitAt 16 macs
+                 let (macEdPayload, macs) = BS.splitAt (BS.length bs - 32) bs
+                     (macedMac1, macedMac2) = BS.splitAt 16 macs
                  in Just MACed{..}
 
 data Message
   = InitMessage Init
   | InitResponseMessage InitResponse
   | TransportDataMessage TransportData
-
+  deriving (Eq, Show)
 
 -- getMessage :: Get Message --
 getMessage :: ByteString -> Either String Message

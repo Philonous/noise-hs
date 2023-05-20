@@ -123,3 +123,5 @@ aeadDecrypt key counter cypherBS authText =
   in case AEAD.finalize state3 == authTag of
        False -> Nothing
        True -> Just plaintext
+
+-- TODO: Blake2s keyed mode is not supported by cryptonite yet.

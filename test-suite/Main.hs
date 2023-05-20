@@ -10,7 +10,8 @@ import           Hedgehog
 import qualified Hedgehog.Gen        as Gen
 import qualified Hedgehog.Range      as Range
 
-import           Nonce
+import           Wireguard.Nonce
+import           Wireguard.Wire
 
 main :: IO ()
 main = do
@@ -67,8 +68,8 @@ genBehaviour =
                 , (1, Replay <$> Gen.int (Range.linear 0 20))
                 ]
 
-spec :: Spec
-spec = describe "Nonce" $ do
+nonceSpec :: Spec
+nonceSpec = describe "Nonce" $ do
   it "Works with jumps" $ hedgehog $ do
     keep <- forAll $ Gen.list (Range.linear 0 200) Gen.bool
     let nonces = map snd . filter fst $ zip keep [1..]
@@ -83,3 +84,20 @@ spec = describe "Nonce" $ do
     let nonces = interpretBehaviour behaviour
     annotate $ show nonces
     checkSequence newWindow nonces
+
+wireSpec :: Spec
+wireSpec = describe "Wire format" $ do
+  describe "transport data message" $ do
+    it "roundtrips through the parser" $ hedgehog $ do
+      receiver <- forAll $ Gen.word32 Range.linearBounded
+      counter <- forAll $ Gen.word64 Range.linearBounded
+      packet <- forAll $ Gen.bytes (Range.linear 0 4069)
+      let td = TransportData{..}
+          bs = writeTransportDataMessage td
+          message = getMessage bs
+      message === Right (TransportDataMessage td)
+      return ()
+
+spec = do
+  nonceSpec
+  wireSpec

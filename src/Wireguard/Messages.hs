@@ -6,19 +6,15 @@
 module Wireguard.Messages where
 
 import           Control.Monad          (guard)
+import           Control.Monad.Trans
 import           Crypto.Random.Types    (MonadRandom(getRandomBytes))
 import           Data.Bits              (Bits(shiftL))
 import           Data.ByteString        (ByteString)
 import qualified Data.ByteString        as BS
 import qualified Data.ByteString.Base64 as Base64
 import           Data.Fixed
-import           Data.IORef
 import           Data.Kind
 import qualified Data.List              as List
-import           Data.Map.Strict        (Map)
-import qualified Data.Map.Strict        as Map
-import           Data.Text              (Text)
-import qualified Data.Text              as Text
 import qualified Data.Text.Encoding     as Text
 import           Data.Time.Clock
 import           Data.Time.Clock.POSIX
@@ -30,6 +26,9 @@ import           Wireguard.Nonce
 import qualified Wireguard.Wire         as Wire
 
 import qualified Wireguard.Crypto       as Crypto
+
+-- TODO: mac1 and mac2 in init and response messages
+-- They require Blake2s keyed mode which isn't supported by cryptonite yet
 
 construction :: ByteString
 construction = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s"
@@ -104,19 +103,20 @@ data State (st :: ConState) =
   State
   { sPrivOur :: Crypto.SecretKey
   , sPubOur :: Crypto.PublicKey
-  , ePrivOur :: AtStates '[Initialized, SentInit, HaveInit] st Crypto.SecretKey
-  , ePubOur :: AtStates '[Initialized, SentInit, HaveInit] st Crypto.PublicKey
-  , sPubTheirs :: AtStates '[SentInit, HaveInit, Open] st Crypto.PublicKey
+  , ePrivOur :: AtStates '[ 'Initialized, 'SentInit, 'HaveInit] st Crypto.SecretKey
+  , ePubOur :: AtStates '[ 'Initialized, 'SentInit, 'HaveInit] st Crypto.PublicKey
+  , sPubTheirs :: AtStates '[ 'SentInit, 'HaveInit, 'Open] st Crypto.PublicKey
   , q
   , h :: ByteString
-  , c :: AtStates '[Initialized, SentInit, HaveInit] st ByteString
-  , we :: Word32
-  , ePubTheirs :: AtStates '[HaveInit] st Crypto.PublicKey
-  , they :: AtStates [HaveInit, Open] st Word32
-  , tSend, tRecv :: AtStates '[Open] st ByteString
+  , c :: AtStates '[ 'Initialized, 'SentInit, 'HaveInit] st ByteString
+  , we :: Word32 -- ^ Randomly chosen, identifies the session
+  , ePubTheirs :: AtStates '[ 'HaveInit] st Crypto.PublicKey
+  , they :: AtStates [ 'HaveInit, 'Open] st Word32
+  , tSend, tRecv :: AtStates '[ 'Open] st ByteString
   , nSend :: Word64
   , nRecv :: Window -- priority queue to keep track of which n we have seen
   , conState :: ConStateS st -- ^ See [ConStateS]
+  , created :: UTCTime
   }
 
 instance Show (State st) where
@@ -162,7 +162,7 @@ instance Show (State st) where
       b64 = show . Text.decodeUtf8 . Base64.encode
       -- Some uglyness to avoid bringing in singletons
       helperISH :: forall a. (a -> String)
-                -> AtStates '[Initialized, SentInit, HaveInit] st a
+                -> AtStates '[ 'Initialized, 'SentInit, 'HaveInit] st a
                 -> String
       helperISH f k = case conState of
                             SInitialized -> f k
@@ -182,11 +182,12 @@ getRandomWord32 = do
   return $ BS.foldl' (\w b -> w `shiftL` 8 + fromIntegral b) 0 bytes
 
 initState
-  :: MonadRandom m =>
+  :: (MonadRandom m, MonadIO m) =>
      SecretKey
   -> m (State 'Initialized)
 initState sPrivOur = do
   (ePrivOur, ePubOur) <- mkKeyPair
+  created <- liftIO getCurrentTime
   we <- getRandomWord32
   let sPubOur = Crypto.toPublic sPrivOur
       q = BS.replicate 32 0
@@ -205,39 +206,45 @@ initState sPrivOur = do
 mkInitMessage
   :: PublicKey
   -> TAI64N
-  -> State Initialized
-  -> (Wire.Init, State SentInit)
+  -> State 'Initialized
+  -> (Wire.Init, State 'SentInit)
 mkInitMessage sPubR (TAI64N tStamp) State{..} =
   let sPrivI=sPrivOur
       sPubI=sPubOur
       ePrivI=ePrivOur
       ePubI=ePubOur
-      sender=we
+      initSender=we
       hi=h
       ci=c
 
       hi' = hash (hi <> encodeBS sPubR)
       ci' = kdf1 ci (encodeBS ePubI)
-      ephemeral = encodeBS ePubI
-      hi'' = hash (hi' <> ephemeral)
+      initEphemeral = encodeBS ePubI
+      hi'' = hash (hi' <> initEphemeral)
       (ci'', k) = kdf2 ci' (dh ePrivI sPubR)
-      static = aeadEncrypt k 0 (encodeBS sPubI) hi''
-      hi''' = hash (hi'' <> static)
+      initStatic = aeadEncrypt k 0 (encodeBS sPubI) hi''
+      hi''' = hash (hi'' <> initStatic)
       (ci_final, k') = kdf2 ci'' (dh sPrivI sPubR)
-      timestamp = aeadEncrypt k' 0 tStamp hi'''
-      hi_final = hash (hi''' <> timestamp)
-  in (Wire.Init{..}, State { c = ci_final
-                           , h = hi_final
-                           , sPubTheirs = sPubR
-                           , conState = SSentInit
-                           , ..
-                           })
+      initTimestamp = aeadEncrypt k' 0 tStamp hi'''
+      hi_final = hash (hi''' <> initTimestamp)
+
+      initMessage = Wire.Init{..}
+      bs = Wire.writeInitMessage initMessage
+      -- TODO mac1 mac2
+  in ( initMessage
+     , State { c = ci_final
+             , h = hi_final
+             , sPubTheirs = sPubR
+             , conState = SSentInit
+             , ..
+             })
+
 
 checkInitMessage
   :: Maybe TAI64N
   -> Wire.Init
-  -> State Initialized
-  -> Maybe (PublicKey, TAI64N, State HaveInit)
+  -> State 'Initialized
+  -> Maybe (PublicKey, TAI64N, State 'HaveInit)
 checkInitMessage mbOldTStamp Wire.Init{..} State{..} = do -- Maybe
   let sPrivR = sPrivOur
       sPubR = sPubOur
@@ -245,28 +252,28 @@ checkInitMessage mbOldTStamp Wire.Init{..} State{..} = do -- Maybe
       hi = h
 
   let hi' = hash (hi <> encodeBS sPubR)
-  ePubI <- readPublicKey ephemeral
-  let ci' = kdf1 ci ephemeral
-      hi'' = hash (hi' <> ephemeral)
+  ePubI <- readPublicKey initEphemeral
+  let ci' = kdf1 ci initEphemeral
+      hi'' = hash (hi' <> initEphemeral)
       (ci'', k) = kdf2 ci' (dh sPrivR ePubI)
 
-  sPubIReceivedBS <- aeadDecrypt k 0 static hi''
+  sPubIReceivedBS <- aeadDecrypt k 0 initStatic hi''
   sPubIReceived <- readPublicKey sPubIReceivedBS
 
-  let hi''' = hash (hi'' <> static)
+  let hi''' = hash (hi'' <> initStatic)
       (ci_final, k') = kdf2 ci'' (dh sPrivR sPubIReceived)
 
-  tstamp <- TAI64N <$> aeadDecrypt k' 0 timestamp hi'''
+  tstamp <- TAI64N <$> aeadDecrypt k' 0 initTimestamp hi'''
 
   case mbOldTStamp of
     Nothing -> return ()
     Just oldTStamp -> guard $ oldTStamp < tstamp
 
-  let hi_final = hash (hi''' <> timestamp)
+  let hi_final = hash (hi''' <> initTimestamp)
 
   return ( sPubIReceived
          , tstamp
-         , State { they = sender
+         , State { they = initSender
                  , h = hi_final
                  , c = ci_final
                  , ePubTheirs = ePubI
@@ -276,8 +283,8 @@ checkInitMessage mbOldTStamp Wire.Init{..} State{..} = do -- Maybe
                  })
 
 mkResponseMessage
-  :: State HaveInit
-  -> (Wire.InitResponse, State Open)
+  :: State 'HaveInit
+  -> (Wire.InitResponse, State 'Open)
 mkResponseMessage State{..} =
   let sPubI = sPubTheirs
       ePrivR = ePrivOur
@@ -285,18 +292,18 @@ mkResponseMessage State{..} =
       ePubI = ePubTheirs
       hr = h
       cr = c
-      sender = we
-      receiver = they
+      initResponseSender = we
+      initResponseReceiver = they
 
       cr' = kdf1 cr (encodeBS ePubR)
-      ephemeral = encodeBS ePubR
-      hr' = hash (hr <> ephemeral)
+      initResponseEphemeral = encodeBS ePubR
+      hr' = hash (hr <> initResponseEphemeral)
       cr'' = kdf1 cr' (dh ePrivR ePubI)
       cr''' = kdf1 cr'' (dh ePrivR sPubI)
       (cr_final, t, k) = kdf3 cr''' q
       hr'' = hash (hr' <> t)
-      empty = aeadEncrypt k 0 "" hr''
-      hr_final = hash (hr'' <> empty)
+      initResponseEmpty = aeadEncrypt k 0 "" hr''
+      hr_final = hash (hr'' <> initResponseEmpty)
 
       (tSend, tRecv) = kdf2 cr_final mempty
   in ( Wire.InitResponse{..}
@@ -312,26 +319,27 @@ mkResponseMessage State{..} =
             })
 
 checkResponseMessage
-  :: State SentInit
+  :: State 'SentInit
   -> Wire.InitResponse
-  -> Maybe (State Open)
+  -> Maybe (State 'Open)
 checkResponseMessage State{..} Wire.InitResponse{..} = do -- Maybe
+  guard $ initResponseReceiver == we
   let hr = h
       cr = c
       sPrivI = sPrivOur
       ePrivI = ePrivOur
 
-  let cr' = kdf1 cr ephemeral
-  ePubR <- readPublicKey ephemeral
-  let hr' = hash (hr <> ephemeral)
+  let cr' = kdf1 cr initResponseEphemeral
+  ePubR <- readPublicKey initResponseEphemeral
+  let hr' = hash (hr <> initResponseEphemeral)
       cr'' = kdf1 cr' (dh ePrivI ePubR)
       cr''' = kdf1 cr'' (dh sPrivI ePubR)
       (cr_final, t, k) = kdf3 cr''' q
       hr'' = hash (hr' <> t)
 
-  nullBS <- aeadDecrypt k 0 empty hr''
+  nullBS <- aeadDecrypt k 0 initResponseEmpty hr''
   guard $ BS.null nullBS
-  let hr_final = hash (hr'' <> empty)
+  let hr_final = hash (hr'' <> initResponseEmpty)
       (tRecv, tSend) = kdf2 cr_final mempty
 
   Just State{ c = ()
@@ -339,31 +347,36 @@ checkResponseMessage State{..} Wire.InitResponse{..} = do -- Maybe
             , ePrivOur = ()
             , ePubOur = ()
             , ePubTheirs = ()
-            , they = sender
+            , they = initResponseSender
             , tSend
             , tRecv
             , conState = SOpen
             , ..
             }
 
+-- | Encrypt a packet with the symmetric key
+-- 0-pads the payload to a multiple 16 bytes
 mkTransportData
   :: ByteString
-  -> State Open
-  -> (Wire.TransportData, State Open)
-mkTransportData bs st@State{nSend, tSend, they = receiver} =
+  -> State 'Open
+  -> (Wire.TransportData, State 'Open)
+mkTransportData bs st@State{nSend, tSend, they = transportDataReceiver} =
   let paddingLen = 16 - BS.length bs `mod` 16
       bsPadded = bs <> BS.replicate paddingLen 0x0
-      packet = aeadEncrypt tSend nSend bsPadded mempty
-  in (Wire.TransportData{counter = nSend, ..}, st{nSend = nSend + 1})
+      transportDataPacket = aeadEncrypt tSend nSend bsPadded mempty
+  in (Wire.TransportData{transportDataCounter = nSend, ..}, st{nSend = nSend + 1})
 
+
+-- The state state isn't updated if the decryption fails
 recvTransportData
   :: Wire.TransportData
-  -> State Open
-  -> (Maybe ByteString, State Open)
+  -> State 'Open
+  -> Either String (ByteString, State 'Open)
 recvTransportData Wire.TransportData{..} st@State{nRecv, tRecv} =
-  case checkNonce counter nRecv of
-    (False, nRecv') -> (Nothing, st{nRecv = nRecv'})
+  case checkNonce transportDataCounter nRecv of
+    -- When the nonce check fails, the state isn't changed
+    (False, _nRecv') -> Left "Nonce error"
     (True, nRecv') ->
-      case aeadDecrypt tRecv counter packet mempty of
-        Nothing -> (Nothing, st{nRecv = nRecv'})
-        Just bs -> (Just bs, st{nRecv = nRecv'})
+      case aeadDecrypt tRecv transportDataCounter transportDataPacket mempty of
+        Nothing -> Left "Decryption error" -- never update state when we can't decrypt the message
+        Just bs -> Right (bs, st{nRecv = nRecv'})

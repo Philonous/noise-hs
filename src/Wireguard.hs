@@ -121,6 +121,11 @@ newtype Connection = Connection (MVar WGConnection__)
 withConnection :: Connection -> (WGConnection__ -> IO (WGConnection__, b)) -> IO b
 withConnection (Connection mv) = modifyMVar mv
 
+-- | Create a new connection.
+connection :: (ByteString -> IO ()) -- ^ Send upstream
+           -> SecretKey -- ^ Our Secret key
+           -> PublicKey -- ^ Peers public key
+           -> IO Connection
 connection send ourKey theirKey = do
   wgSendRekeyTimeoutReached <- newIORef False
   wgReceiveRekeyTimeoutReached <- newIORef False
@@ -142,6 +147,10 @@ connection send ourKey theirKey = do
       }
   mkWeakMVar conVar (close $ Connection conVar)
   return $ Connection conVar
+
+-- | Set the upstream send function
+setSend :: Connection -> (ByteString -> IO ()) -> IO ()
+setSend con s = withConnection con $ \con__ -> return (con__{wgSend = s}, ())
 
 waitSession config a sess onConnected = do
   waitSessionSendRekeyTimeoutReached <- newIORef False
@@ -267,7 +276,7 @@ input con bs =
               logDebug [i|Received unaccpetable response message #{msg}|]
               return (con__, Nothing)
             Just session -> do
-              waitSessionOnConnected waitSession
+              putMVar (waitSessionOnConnected waitSession) ()
               return (con__{ wgPreviousSession = wgCurrentSession con__
                            , wgCurrentSession = Just session
                            , wgNewSession = Nothing
